@@ -1,4 +1,7 @@
 # Virt-Manager Linked Clone Extension
+![IMG_8857](https://github.com/user-attachments/assets/ab6d70c4-5fd3-4d93-9f35-336a71efcc62)
+
+<img width="1847" height="1251" alt="image" src="https://github.com/user-attachments/assets/164b601f-0eba-4177-a532-40011c94b8c9" />
 
 This project adds linked clone functionality to virt-manager (Virtual Machine Manager), allowing you to create space-efficient linked clones of virtual machines directly from the virt-manager GUI.
 
