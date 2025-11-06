@@ -1,0 +1,27 @@
+[Unit]
+Description=Virsh Lab Manager API Service
+Documentation=https://github.com/example/vmm-linked-clone
+After=network.target libvirtd.service
+Wants=libvirtd.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/python3 /usr/bin/virsh_api.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vmm-linked-clone-api
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Environment
+Environment="PYTHONUNBUFFERED=1"
+Environment="VIRSH_API_PORT=9393"
+
+[Install]
+WantedBy=multi-user.target
+

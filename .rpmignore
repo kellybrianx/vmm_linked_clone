@@ -1,0 +1,15 @@
+*.pyc
+__pycache__/
+*.pyo
+*.swp
+*.swo
+*~
+.DS_Store
+.git/
+.gitignore
+.rpmignore
+Makefile
+install.sh
+*.spec
+*.service
+
