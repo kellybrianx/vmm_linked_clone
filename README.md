@@ -132,6 +132,9 @@ The REST API provides programmatic access to VM management operations. After ins
 - `GET /api/v1/vms/{vm_name}/console` - Get console information
 - `POST /api/v1/vms/{vm_name}/linked-clone` - Create a linked clone
   - Request body: `{"new_vm_name": "clone-name", "disk_target": "optional/path", "connection_uri": "optional"}`
+- `DELETE /api/v1/vms/{vm_name}/delete` - Delete a VM and all its storage
+  - WARNING: This permanently deletes the VM and all associated disk images
+  - Query parameters: `connection_uri` (optional)
 - `GET /docs` - Interactive API documentation (Swagger UI)
 - `GET /openapi.json` - OpenAPI specification
 
@@ -151,6 +154,9 @@ curl -X POST http://localhost:9393/api/v1/vms/my-vm/start
 curl -X POST http://localhost:9393/api/v1/vms/my-vm/linked-clone \
   -H "Content-Type: application/json" \
   -d '{"new_vm_name": "my-vm-clone"}'
+
+# Delete a VM and all its storage (WARNING: irreversible)
+curl -X DELETE http://localhost:9393/api/v1/vms/my-vm/delete
 
 # View interactive API documentation
 # Open http://localhost:9393/docs in your browser

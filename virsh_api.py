@@ -11,11 +11,11 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, HTTPException, Query, Body
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 app = FastAPI(
-    title="Virsh Lab Manager API",
-    description="REST API for managing virtual machines via virsh commands",
+    title="vmm-lab-manager",
+    description="Managing VMs so you don't have to pretend you enjoy virsh.",
     version="1.0.0"
 )
 
@@ -49,9 +49,9 @@ class OperationResponse(BaseModel):
 
 class LinkedCloneRequest(BaseModel):
     """Request model for creating a linked clone"""
-    new_vm_name: str
-    disk_target: Optional[str] = None
-    connection_uri: Optional[str] = None
+    new_vm_name: str = Field(..., example="")
+    disk_target: Optional[str] = Field(None, example="")
+    connection_uri: Optional[str] = Field(None, example="")
 
 
 class LinkedCloneResponse(BaseModel):
@@ -190,7 +190,8 @@ async def root():
             "reboot": "/api/v1/vms/{vm_name}/reboot",
             "pause": "/api/v1/vms/{vm_name}/pause",
             "resume": "/api/v1/vms/{vm_name}/resume",
-            "linked_clone": "/api/v1/vms/{vm_name}/linked-clone"
+            "linked_clone": "/api/v1/vms/{vm_name}/linked-clone",
+            "delete": "/api/v1/vms/{vm_name}/delete"
         }
     }
 
@@ -454,14 +455,15 @@ async def create_linked_clone(
     # Script signature: vmm_linked_clone.sh <SOURCE_VM> <NEW_VM_NAME> [<DISK_TARGET>] [<CONNECTION_URI>]
     cmd = [script_path, vm_name, request.new_vm_name]
     
-    # Add optional disk_target if provided
-    if request.disk_target:
+    # Add optional disk_target if provided (including empty string)
+    # Empty string means use source disk directory, None means omit the argument
+    if request.disk_target is not None:
         cmd.append(request.disk_target)
     
     # Add optional connection_uri if provided
-    # If connection_uri is provided but disk_target is not, we need to add empty string for disk_target
+    # If connection_uri is provided but disk_target is None, we need to add empty string for disk_target
     if request.connection_uri:
-        if not request.disk_target:
+        if request.disk_target is None:
             cmd.append("")  # Empty disk_target to maintain positional order
         cmd.append(request.connection_uri)
     
@@ -514,6 +516,74 @@ async def create_linked_clone(
             status_code=500,
             detail=f"Unexpected error creating linked clone: {str(e)}"
         )
+
+
+@app.delete("/api/v1/vms/{vm_name}/delete", tags=["VM Management"])
+async def delete_vm(
+    vm_name: str,
+    connection_uri: Optional[str] = Query(None, description="Libvirt connection URI")
+):
+    """
+    Delete a virtual machine and all its storage.
+    
+    This endpoint permanently removes a VM and all associated storage files.
+    WARNING: This operation is irreversible and will delete all disk images.
+    
+    The operation:
+    1. First destroys the VM if it's running (force stop)
+    2. Then undefines the VM and removes all storage using 'virsh undefine --remove-all-storage'
+    
+    Args:
+        vm_name: Name of the VM to delete
+        connection_uri: Optional libvirt connection URI
+    
+    Returns:
+        OperationResponse with deletion status
+    """
+    # First, check if VM exists and get its state
+    stdout, returncode = run_virsh_command(['dominfo', vm_name], connection_uri)
+    
+    if returncode != 0:
+        raise HTTPException(
+            status_code=404,
+            detail=f"VM '{vm_name}' not found: {stdout}"
+        )
+    
+    # Check if VM is running - if so, destroy it first
+    # Parse the state from dominfo output
+    vm_state = None
+    for line in stdout.split('\n'):
+        if 'State:' in line:
+            vm_state = line.split(':', 1)[1].strip().lower()
+            break
+    
+    # If VM is running, destroy it first
+    if vm_state and 'running' in vm_state:
+        destroy_stdout, destroy_returncode = run_virsh_command(['destroy', vm_name], connection_uri)
+        if destroy_returncode != 0:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to stop running VM '{vm_name}': {destroy_stdout}"
+            )
+    
+    # Now undefine the VM and remove all storage
+    stdout, returncode = run_virsh_command(
+        ['undefine', '--domain', vm_name, '--remove-all-storage'],
+        connection_uri,
+        timeout=60  # Longer timeout for storage deletion
+    )
+    
+    if returncode != 0:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to delete VM '{vm_name}' and its storage: {stdout}"
+        )
+    
+    return OperationResponse(
+        success=True,
+        message=f"VM '{vm_name}' and all its storage have been permanently deleted",
+        vm_name=vm_name
+    ).dict()
 
 
 if __name__ == "__main__":
