@@ -38,7 +38,18 @@ Linked clones are virtual machine clones that share the same base disk image as 
 
 The easiest way to install all components is via the RPM package:
 
-1. **Build the RPM** (if not already built):
+**Option 1: Use the pre-built RPM** (if available in the project folder):
+   ```bash
+   sudo rpm -ivh vmm-linked-clone-1.0.0-1.fc41.noarch.rpm
+   ```
+
+   Or if upgrading:
+   ```bash
+   sudo rpm -Uvh vmm-linked-clone-1.0.0-1.fc41.noarch.rpm
+   ```
+
+**Option 2: Build and install from source**:
+1. **Build the RPM**:
    ```bash
    make rpm
    ```
@@ -279,8 +290,21 @@ The built RPM will be at:
 
 ### RPM Installation
 
+**From project folder** (if pre-built RPM is available):
+```bash
+sudo rpm -ivh vmm-linked-clone-1.0.0-1.fc41.noarch.rpm
+```
+
+**From build directory** (after building):
 ```bash
 sudo rpm -ivh ~/rpmbuild/RPMS/noarch/vmm-linked-clone-1.0.0-1.fc41.noarch.rpm
+```
+
+Or if upgrading:
+```bash
+sudo rpm -Uvh vmm-linked-clone-1.0.0-1.fc41.noarch.rpm
+# or
+sudo rpm -Uvh ~/rpmbuild/RPMS/noarch/vmm-linked-clone-1.0.0-1.fc41.noarch.rpm
 ```
 
 The service is automatically enabled and started after installation.
@@ -340,6 +364,7 @@ sudo rpm -e vmm-linked-clone
 - `virsh_api.py`: FastAPI REST API for programmatic VM management
 - `vmm-linked-clone.spec`: RPM spec file for building the package
 - `vmm-linked-clone-api.service`: Systemd service file for the API
+- `vmm-linked-clone-1.0.0-1.fc41.noarch.rpm`: Pre-built RPM package (if available)
 - `Makefile`: Build automation for RPM package
 - `install.sh`: Manual installation script
 - `requirements.txt`: Python dependencies for the API
