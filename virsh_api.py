@@ -63,10 +63,25 @@ class LinkedCloneResponse(BaseModel):
     disk_path: Optional[str] = None
 
 
+class VMInterface(BaseModel):
+    """VM network interface information"""
+    name: str
+    mac_address: Optional[str] = None
+    protocol: Optional[str] = None
+    address: Optional[str] = None
+
+
+class VMIPResponse(BaseModel):
+    """Response model for VM IP address"""
+    vm_name: str
+    interfaces: List[VMInterface]
+
+
 def run_virsh_command(
     command: List[str],
     connection_uri: Optional[str] = None,
-    timeout: int = 30
+    timeout: int = 30,
+    use_sudo: bool = False
 ) -> tuple[str, int]:
     """
     Execute a virsh command and return stdout and return code.
@@ -75,11 +90,12 @@ def run_virsh_command(
         command: List of command arguments (e.g., ['list', '--all'])
         connection_uri: Optional libvirt connection URI
         timeout: Command timeout in seconds
+        use_sudo: Whether to run the command with sudo
     
     Returns:
         Tuple of (stdout, return_code)
     """
-    cmd = ['virsh']
+    cmd = ['sudo', 'virsh'] if use_sudo else ['virsh']
     if connection_uri:
         cmd.extend(['-c', connection_uri])
     cmd.extend(command)
@@ -92,7 +108,13 @@ def run_virsh_command(
             timeout=timeout,
             check=False
         )
-        return result.stdout.strip(), result.returncode
+        # For error cases, combine stdout and stderr for better error messages
+        # For success cases, stdout should be clean for parsing
+        output = result.stdout.strip()
+        if result.returncode != 0 and result.stderr.strip():
+            # Include stderr in error output
+            output = f"{output}\n{result.stderr.strip()}" if output else result.stderr.strip()
+        return output, result.returncode
     except subprocess.TimeoutExpired:
         raise HTTPException(
             status_code=504,
@@ -103,6 +125,47 @@ def run_virsh_command(
             status_code=500,
             detail=f"Error executing virsh command: {str(e)}"
         )
+
+
+def parse_domifaddr_output(output: str) -> List[VMInterface]:
+    """
+    Parse 'virsh domifaddr' output into VMInterface objects.
+    
+    Args:
+        output: Output from 'virsh domifaddr <vm_name>'
+    
+    Returns:
+        List of VMInterface objects
+    """
+    interfaces = []
+    lines = output.split('\n')
+    
+    # Skip header lines (usually 2 lines: title and separator)
+    for line in lines[2:]:
+        if not line.strip():
+            continue
+        
+        # Split by whitespace, but handle multiple spaces
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        
+        # Format: Name MAC Protocol Address
+        # Example: vnet0 52:54:00:12:34:56 ipv4 192.168.122.100/24
+        name = parts[0] if len(parts) > 0 else ""
+        mac = parts[1] if len(parts) > 1 else None
+        protocol = parts[2] if len(parts) > 2 else None
+        address = parts[3] if len(parts) > 3 else None
+        
+        if name:
+            interfaces.append(VMInterface(
+                name=name,
+                mac_address=mac,
+                protocol=protocol,
+                address=address
+            ))
+    
+    return interfaces
 
 
 def parse_vm_list(output: str) -> List[VMInfo]:
@@ -191,7 +254,8 @@ async def root():
             "pause": "/api/v1/vms/{vm_name}/pause",
             "resume": "/api/v1/vms/{vm_name}/resume",
             "linked_clone": "/api/v1/vms/{vm_name}/linked-clone",
-            "delete": "/api/v1/vms/{vm_name}/delete"
+            "delete": "/api/v1/vms/{vm_name}/delete",
+            "ip_address": "/api/v1/vms/{vm_name}/ip"
         }
     }
 
@@ -516,6 +580,66 @@ async def create_linked_clone(
             status_code=500,
             detail=f"Unexpected error creating linked clone: {str(e)}"
         )
+
+
+@app.get("/api/v1/vms/{vm_name}/ip", tags=["VM Management"])
+async def get_vm_ip(
+    vm_name: str,
+    connection_uri: Optional[str] = Query(None, description="Libvirt connection URI")
+):
+    """
+    Get IP address(es) for a virtual machine's network interfaces.
+    
+    This endpoint uses 'sudo virsh domifaddr' to retrieve IP addresses
+    assigned to the VM's network interfaces.
+    
+    Args:
+        vm_name: Name of the VM
+        connection_uri: Optional libvirt connection URI
+    
+    Returns:
+        VMIPResponse with interface information including IP addresses
+    """
+    stdout, returncode = run_virsh_command(
+        ['domifaddr', vm_name],
+        connection_uri,
+        use_sudo=True
+    )
+    
+    if returncode != 0:
+        # Check if VM doesn't exist
+        if 'not found' in stdout.lower() or 'no domain' in stdout.lower():
+            raise HTTPException(
+                status_code=404,
+                detail=f"VM '{vm_name}' not found: {stdout}"
+            )
+        # Check if VM is not running (domifaddr requires running VM)
+        if 'not running' in stdout.lower() or 'shut off' in stdout.lower():
+            raise HTTPException(
+                status_code=400,
+                detail=f"VM '{vm_name}' is not running. IP addresses are only available for running VMs."
+            )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get IP address for VM '{vm_name}': {stdout}"
+        )
+    
+    # Parse the output
+    interfaces = parse_domifaddr_output(stdout)
+    
+    # If no interfaces found, return empty list
+    if not interfaces:
+        # Check if output indicates no addresses
+        if 'no ip address' in stdout.lower() or 'no interface' in stdout.lower():
+            return VMIPResponse(
+                vm_name=vm_name,
+                interfaces=[]
+            ).dict()
+    
+    return VMIPResponse(
+        vm_name=vm_name,
+        interfaces=interfaces
+    ).dict()
 
 
 @app.delete("/api/v1/vms/{vm_name}/delete", tags=["VM Management"])
