@@ -77,6 +77,21 @@ class VMIPResponse(BaseModel):
     interfaces: List[VMInterface]
 
 
+class VMWithIP(BaseModel):
+    """VM information with IP addresses"""
+    name: str
+    state: str
+    id: Optional[int] = None
+    uuid: Optional[str] = None
+    interfaces: List[VMInterface] = []
+
+
+class VMsWithIPsResponse(BaseModel):
+    """Response model for listing VMs with IP addresses"""
+    count: int
+    vms: List[VMWithIP]
+
+
 def run_virsh_command(
     command: List[str],
     connection_uri: Optional[str] = None,
@@ -168,6 +183,85 @@ def parse_domifaddr_output(output: str) -> List[VMInterface]:
     return interfaces
 
 
+def get_vm_interfaces_via_guest_agent(
+    vm_name: str,
+    connection_uri: Optional[str] = None
+) -> List[VMInterface]:
+    """
+    Get VM network interfaces with IP addresses using QEMU guest agent.
+    
+    This is a fallback method when 'virsh domifaddr' doesn't return results.
+    The guest agent provides more reliable IP address information.
+    
+    Args:
+        vm_name: Name of the VM
+        connection_uri: Optional libvirt connection URI
+    
+    Returns:
+        List of VMInterface objects with IP addresses
+    """
+    interfaces = []
+    
+    # Build the qemu-agent-command
+    cmd = ['virsh']
+    if connection_uri:
+        cmd.extend(['-c', connection_uri])
+    cmd.extend(['qemu-agent-command', vm_name, '{"execute":"guest-network-get-interfaces"}'])
+    
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False
+        )
+        
+        if result.returncode != 0:
+            return interfaces
+        
+        # Parse JSON response
+        data = json.loads(result.stdout)
+        
+        if 'return' in data and isinstance(data['return'], list):
+            for iface in data['return']:
+                # Skip loopback interface
+                if iface.get('name') == 'lo':
+                    continue
+                
+                # Get MAC address
+                mac = iface.get('hardware-address')
+                
+                # Get IP addresses
+                ip_addresses = iface.get('ip-addresses', [])
+                for ip_info in ip_addresses:
+                    ip_type = ip_info.get('ip-address-type', '')
+                    ip_addr = ip_info.get('ip-address', '')
+                    prefix = ip_info.get('prefix', '')
+                    
+                    # Format address with prefix (e.g., 192.168.1.201/24)
+                    if ip_addr and prefix:
+                        formatted_addr = f"{ip_addr}/{prefix}"
+                    else:
+                        formatted_addr = ip_addr
+                    
+                    # Map guest interface name to host vnet name if possible
+                    # We'll use the guest interface name, but could map via MAC
+                    interface_name = iface.get('name', 'unknown')
+                    
+                    interfaces.append(VMInterface(
+                        name=interface_name,
+                        mac_address=mac,
+                        protocol=ip_type,
+                        address=formatted_addr
+                    ))
+    except (json.JSONDecodeError, KeyError, Exception):
+        # If parsing fails, return empty list
+        pass
+    
+    return interfaces
+
+
 def parse_vm_list(output: str) -> List[VMInfo]:
     """
     Parse 'virsh list --all' output into VMInfo objects.
@@ -246,6 +340,7 @@ async def root():
         "version": "1.0.0",
         "endpoints": {
             "list_vms": "/api/v1/vms",
+            "list_vms_with_ips": "/api/v1/vms/ips",
             "vm_status": "/api/v1/vms/{vm_name}/status",
             "power_on": "/api/v1/vms/{vm_name}/start",
             "power_off": "/api/v1/vms/{vm_name}/shutdown",
@@ -287,6 +382,93 @@ async def list_vms(
     return {
         "count": len(vms),
         "vms": [vm.dict() for vm in vms]
+    }
+
+
+@app.get("/api/v1/vms/ips", tags=["VM Management"], response_model=VMsWithIPsResponse)
+async def list_vms_with_ips(
+    connection_uri: Optional[str] = Query(None, description="Libvirt connection URI"),
+    state: Optional[str] = Query(None, description="Filter by state (running, shut, etc.)")
+):
+    """
+    List all virtual machines with their IP addresses.
+    
+    Returns a list of all VMs with their current state and network interface information.
+    VMs that are not running will have empty interfaces lists.
+    """
+    # Get all VMs
+    stdout, returncode = run_virsh_command(['list', '--all'], connection_uri)
+    
+    if returncode != 0:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to list VMs: {stdout}"
+        )
+    
+    vms = parse_vm_list(stdout)
+    
+    # Filter by state if requested
+    if state:
+        vms = [vm for vm in vms if vm.state.lower() == state.lower()]
+    
+    # Get IP addresses for each VM
+    vms_with_ips = []
+    for vm in vms:
+        interfaces = []
+        
+        # Only try to get IP addresses if VM is running
+        # Check if state indicates running (case-insensitive)
+        if vm.state.lower() in ['running', 'idle', 'paused']:
+            try:
+                stdout, returncode = run_virsh_command(
+                    ['domifaddr', vm.name],
+                    connection_uri,
+                    use_sudo=True
+                )
+                
+                if returncode == 0:
+                    interfaces = parse_domifaddr_output(stdout)
+                
+                # If no interfaces found via domifaddr, try guest agent as fallback
+                if not interfaces:
+                    try:
+                        interfaces = get_vm_interfaces_via_guest_agent(vm.name, connection_uri)
+                    except Exception:
+                        # If guest agent also fails, continue with empty interfaces
+                        pass
+            except HTTPException:
+                # If getting IP fails, try guest agent as fallback
+                try:
+                    interfaces = get_vm_interfaces_via_guest_agent(vm.name, connection_uri)
+                except Exception:
+                    pass
+            except Exception:
+                # Any other error, try guest agent as fallback
+                try:
+                    interfaces = get_vm_interfaces_via_guest_agent(vm.name, connection_uri)
+                except Exception:
+                    pass
+        
+        # Get UUID if available
+        uuid = None
+        try:
+            stdout, returncode = run_virsh_command(['domuuid', vm.name], connection_uri)
+            if returncode == 0:
+                uuid = stdout.strip()
+        except Exception:
+            pass
+        
+        vms_with_ips.append(VMWithIP(
+            name=vm.name,
+            state=vm.state,
+            id=vm.id,
+            uuid=uuid,
+            interfaces=interfaces
+        ))
+    
+    return {
+        "count": len(vms_with_ips),
+        "vms": [vm.dict() for vm in vms_with_ips]
     }
 
 
@@ -627,7 +809,15 @@ async def get_vm_ip(
     # Parse the output
     interfaces = parse_domifaddr_output(stdout)
     
-    # If no interfaces found, return empty list
+    # If no interfaces found via domifaddr, try guest agent as fallback
+    if not interfaces:
+        try:
+            interfaces = get_vm_interfaces_via_guest_agent(vm_name, connection_uri)
+        except Exception:
+            # If guest agent also fails, continue with empty list
+            pass
+    
+    # If still no interfaces found, return empty list
     if not interfaces:
         # Check if output indicates no addresses
         if 'no ip address' in stdout.lower() or 'no interface' in stdout.lower():
