@@ -92,6 +92,18 @@ class VMsWithIPsResponse(BaseModel):
     vms: List[VMWithIP]
 
 
+class VMDisk(BaseModel):
+    """VM disk information"""
+    target: str
+    source: Optional[str] = None
+
+
+class VMDisksResponse(BaseModel):
+    """Response model for VM disk locations"""
+    vm_name: str
+    disks: List[VMDisk]
+
+
 def run_virsh_command(
     command: List[str],
     connection_uri: Optional[str] = None,
@@ -298,6 +310,44 @@ def parse_vm_list(output: str) -> List[VMInfo]:
     return vms
 
 
+def parse_domblklist_output(output: str) -> List[VMDisk]:
+    """
+    Parse 'virsh domblklist' output into VMDisk objects.
+    
+    Args:
+        output: Output from 'virsh domblklist <vm_name>'
+    
+    Returns:
+        List of VMDisk objects
+    """
+    disks = []
+    lines = output.split('\n')
+    
+    # Skip header lines (usually 2 lines: title and separator)
+    for line in lines[2:]:
+        if not line.strip():
+            continue
+        
+        # Split by whitespace, but handle multiple spaces
+        parts = line.split()
+        if len(parts) < 1:
+            continue
+        
+        # Format: Target Source
+        # Example: vda /path/to/disk.qcow2
+        # Example: hda - (for empty CD-ROM)
+        target = parts[0] if len(parts) > 0 else ""
+        source = parts[1] if len(parts) > 1 and parts[1] != '-' else None
+        
+        if target:
+            disks.append(VMDisk(
+                target=target,
+                source=source
+            ))
+    
+    return disks
+
+
 def find_linked_clone_script() -> str:
     """
     Find the vmm_linked_clone.sh script.
@@ -350,7 +400,8 @@ async def root():
             "resume": "/api/v1/vms/{vm_name}/resume",
             "linked_clone": "/api/v1/vms/{vm_name}/linked-clone",
             "delete": "/api/v1/vms/{vm_name}/delete",
-            "ip_address": "/api/v1/vms/{vm_name}/ip"
+            "ip_address": "/api/v1/vms/{vm_name}/ip",
+            "disks": "/api/v1/vms/{vm_name}/disks"
         }
     }
 
@@ -497,15 +548,25 @@ async def get_vm_status(
             value = value.strip()
             info[key] = value
     
+    # Helper function to safely parse integer values
+    def safe_int(value: Optional[str]) -> Optional[int]:
+        """Safely convert string to int, handling '-', '-1', and empty values"""
+        if not value or value in ('-', '-1', ''):
+            return None
+        try:
+            return int(value)
+        except (ValueError, TypeError):
+            return None
+    
     # Extract key fields
     status = VMStatus(
         name=info.get('name', vm_name),
         state=info.get('state', 'unknown'),
-        id=int(info['id']) if info.get('id', '-1') != '-1' else None,
+        id=safe_int(info.get('id')),
         uuid=info.get('uuid'),
         max_memory=info.get('max_memory'),
         memory=info.get('used_memory'),
-        vcpu=int(info['cpu(s)']) if info.get('cpu(s)') else None,
+        vcpu=safe_int(info.get('cpu(s)')),
         cpu_time=info.get('cpu_time')
     )
     
@@ -724,7 +785,28 @@ async def create_linked_clone(
         )
         
         if result.returncode != 0:
-            error_msg = result.stderr.strip() or result.stdout.strip() or f"Exit code {result.returncode}"
+            # Build comprehensive error message
+            error_parts = []
+            
+            # Add exit code with explanation
+            if result.returncode == 141:
+                error_parts.append("Exit code 141 (SIGPIPE - process terminated due to broken pipe)")
+                error_parts.append("This usually indicates:")
+                error_parts.append("  - A command in the script tried to write to a closed pipe")
+                error_parts.append("  - Disk space issues or permission problems")
+                error_parts.append("  - The script was interrupted")
+            else:
+                error_parts.append(f"Exit code {result.returncode}")
+            
+            # Add stderr if available
+            if result.stderr.strip():
+                error_parts.append(f"\nError output:\n{result.stderr.strip()}")
+            
+            # Add stdout if available (might contain useful info even on error)
+            if result.stdout.strip():
+                error_parts.append(f"\nOutput:\n{result.stdout.strip()}")
+            
+            error_msg = "\n".join(error_parts)
             raise HTTPException(
                 status_code=500,
                 detail=f"Failed to create linked clone: {error_msg}"
@@ -829,6 +911,50 @@ async def get_vm_ip(
     return VMIPResponse(
         vm_name=vm_name,
         interfaces=interfaces
+    ).dict()
+
+
+@app.get("/api/v1/vms/{vm_name}/disks", tags=["VM Management"], response_model=VMDisksResponse)
+async def get_vm_disks(
+    vm_name: str,
+    connection_uri: Optional[str] = Query(None, description="Libvirt connection URI")
+):
+    """
+    Get disk locations (qcow2 files) for a virtual machine.
+    
+    This endpoint uses 'virsh domblklist' to retrieve the disk block devices
+    and their source paths for the VM.
+    
+    Args:
+        vm_name: Name of the VM
+        connection_uri: Optional libvirt connection URI
+    
+    Returns:
+        VMDisksResponse with disk information including qcow2 file paths
+    """
+    stdout, returncode = run_virsh_command(
+        ['domblklist', vm_name],
+        connection_uri
+    )
+    
+    if returncode != 0:
+        # Check if VM doesn't exist
+        if 'not found' in stdout.lower() or 'no domain' in stdout.lower():
+            raise HTTPException(
+                status_code=404,
+                detail=f"VM '{vm_name}' not found: {stdout}"
+            )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get disk information for VM '{vm_name}': {stdout}"
+        )
+    
+    # Parse the output
+    disks = parse_domblklist_output(stdout)
+    
+    return VMDisksResponse(
+        vm_name=vm_name,
+        disks=disks
     ).dict()
 
 
