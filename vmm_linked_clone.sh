@@ -273,12 +273,9 @@ if [[ $VIRT_CLONE_EXIT -ne 0 ]]; then
     # Remove UUID (let libvirt generate new one)
     sed -i '/<uuid>/d' "$TEMP_XML_EDITED"
     
-    # Remove MAC addresses from interfaces (let libvirt generate new ones)
-    sed -i 's/<mac address="[^"]*"\/>/<mac address=""/g' "$TEMP_XML_EDITED"
-    sed -i 's/<mac address="[^"]*">/<mac address="">/g' "$TEMP_XML_EDITED"
-    
-    # Use Python to properly edit the disk section
+    # Use Python to properly edit the XML
     # Update all qcow2 disks to point to their new linked clone files, remove non-qcow2 disks
+    # Remove MAC addresses and PCI addresses to ensure unique network configuration
     # Build the disk mapping string to pass to Python
     DISK_MAPPING_STR=""
     for target_dev in "${QCOW2_TARGETS[@]}"; do
@@ -302,9 +299,10 @@ try:
     tree = ET.parse("$TEMP_XML_EDITED")
     root = tree.getroot()
     
-    # Find all disk devices
+    # Find all devices
     devices = root.find('.//devices')
     if devices is not None:
+        # Handle disk devices
         disks = devices.findall('disk')
         disks_to_remove = []
         
@@ -326,6 +324,20 @@ try:
         # Remove disks that shouldn't be cloned
         for disk in disks_to_remove:
             devices.remove(disk)
+        
+        # Handle network interfaces - remove MAC addresses and PCI addresses
+        # This ensures libvirt generates new unique MAC addresses for each clone
+        interfaces = devices.findall('interface')
+        for interface in interfaces:
+            # Remove MAC address (libvirt will generate a new unique one)
+            mac = interface.find('mac')
+            if mac is not None:
+                interface.remove(mac)
+            
+            # Remove PCI address (libvirt will assign a new one)
+            address = interface.find('address')
+            if address is not None and address.get('type') == 'pci':
+                interface.remove(address)
     
     # Write the modified XML
     tree.write("$TEMP_XML_EDITED", encoding='unicode', xml_declaration=True)
